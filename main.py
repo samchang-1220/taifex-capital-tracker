@@ -7,41 +7,50 @@ import io
 # --- 設定區 ---
 TG_TOKEN = os.getenv('TG_TOKEN')
 TG_CHAT_ID = os.getenv('TG_CHAT_ID')
-HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer': 'https://www.taifex.com.tw/cht/3/futContractsDate'
+}
 
 def send_tg_msg(message):
     if not TG_TOKEN or not TG_CHAT_ID: return
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"})
+    try:
+        r = requests.post(url, json={"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"})
+        print(f"TG Status: {r.status_code}")
+    except: pass
 
 def get_futures_data():
     check_date = datetime.now()
     found_data = False
-    max_tries = 15 # 增加回溯天數防止過年連假
+    # 根據需求，縮短回溯天數為 6 天
+    max_tries = 6 
     
     while not found_data and max_tries > 0:
         date_str = check_date.strftime("%Y/%m/%d")
-        print(f"🔍 嘗試抓取日期: {date_str}...")
+        print(f"🔍 正在嘗試抓取日期: {date_str}...")
         
         try:
-            # 1. 下載三大法人 CSV
+            # 1. 下載三大法人 CSV (三大法人未平倉量)
             inst_url = "https://www.taifex.com.tw/cht/3/futContractsDateDown"
-            r1 = requests.post(inst_url, data={'queryDate': date_str, 'commodityId': ''}, headers=HEADERS)
+            r1 = requests.post(inst_url, data={'queryDate': date_str, 'commodityId': ''}, headers=HEADERS, timeout=10)
             
             # 2. 下載大額交易人 CSV
             large_url = "https://www.taifex.com.tw/cht/3/largeTradersFutDown"
-            r2 = requests.post(large_url, data={'queryDate': date_str}, headers=HEADERS)
+            r2 = requests.post(large_url, data={'queryDate': date_str}, headers=HEADERS, timeout=10)
 
-            # 檢查檔案是否有效 (CSV 檔頭通常包含日期)
-            if "日期" in r1.text and "日期" in r2.text:
-                # 讀取 CSV
-                df_inst = pd.read_csv(io.StringIO(r1.text))
-                df_large = pd.read_csv(io.StringIO(r2.text))
+            # 強制將編碼轉為 cp950 (期交所常用的 Big5) 並檢查內容
+            content1 = r1.content.decode('cp950', errors='ignore')
+            content2 = r2.content.decode('cp950', errors='ignore')
+
+            if "日期" in content1 and "商品名稱" in content1:
+                df_inst = pd.read_csv(io.StringIO(content1))
+                df_large = pd.read_csv(io.StringIO(content2))
                 found_data = True
-                print(f"✅ 成功找到 {date_str} 的 CSV 數據")
+                print(f"✅ 成功找到 {date_str} 的數據！")
                 break
         except Exception as e:
-            print(f"抓取發生異常: {e}")
+            print(f"抓取過程出錯: {e}")
         
         check_date -= timedelta(days=1)
         max_tries -= 1
@@ -50,7 +59,7 @@ def get_futures_data():
         return None, None
 
     results = []
-    # 標的設定
+    # 標的代碼對應
     targets = [
         {"name": "台指期", "inst_code": "臺股期貨", "large_code": "臺股期貨"},
         {"name": "那指期", "inst_code": "美國那斯達克100期貨", "large_code": "美國那斯達克100"}
@@ -58,25 +67,26 @@ def get_futures_data():
 
     for t in targets:
         try:
-            # --- 三大法人計算 ---
-            # 篩選標的
-            target_inst = df_inst[df_inst['商品名稱'].str.strip() == t['inst_code']]
-            # 外資 (身份別為外資及陸資)
-            foreign_net = int(target_inst[target_inst['身份別'].str.contains("外資")]['未平倉持有工口數-淨額'].values[0])
-            # 投信
-            trust_net = int(target_inst[target_inst['身份別'].str.contains("投信")]['未平倉持有工口數-淨額'].values[0])
+            # --- 三大法人資料提取 ---
+            inst_sub = df_inst[df_inst['商品名稱'].str.strip() == t['inst_code']]
+            # 外資未平倉淨額
+            foreign_net = int(inst_sub[inst_sub['身份別'].str.contains("外資")]['未平倉持有工口數-淨額'].values[0])
+            # 投信未平倉淨額
+            trust_net = int(inst_sub[inst_sub['身份別'].str.contains("投信")]['未平倉持有工口數-淨額'].values[0])
 
-            # --- 大額交易人計算 ---
-            # 篩選標的，且合約月份為「所有月份」
-            target_large = df_large[(df_large['商品名稱'].str.strip() == t['large_code']) & (df_large['合約月份'] == '所有月份')]
-            # 抓取「前五大特定法人」的多空部位 (CSV 欄位名稱請見官網說明)
-            # 在 CSV 中，前五大特定法人多方/空方通常是第 10, 11 欄 (索引 9, 10)
-            top5_buy = int(target_large.iloc[0, 9])
-            top5_sell = int(target_large.iloc[0, 10])
-            top5_net = top5_buy - top5_sell
+            # --- 大額交易人資料提取 ---
+            # 篩選特定標的 且 合約月份為所有月份
+            large_sub = df_large[(df_large['商品名稱'].str.strip() == t['large_code']) & (df_large['合約月份'].str.strip() == '所有月份')]
+            # 特定五大法人留倉 = (前五大特定買方 - 前五大特定賣方)
+            # 在 CSV 中，特定買方在第 6 欄，特定賣方在第 8 欄 (Index 5, 7)
+            top5_spec_buy = int(large_sub.iloc[0, 5])
+            top5_spec_sell = int(large_sub.iloc[0, 7])
+            top5_spec_net = top5_spec_buy - top5_spec_sell
 
-            # --- 小外資公式 ---
-            big_f = top5_net - trust_net
+            # --- 公式計算 ---
+            # 1. 大外資 = 特定五大法人 - 投信
+            big_f = top5_spec_net - trust_net
+            # 2. 小外資 = 外資 - 大外資
             small_f = foreign_net - big_f
             
             results.append({
@@ -95,10 +105,11 @@ def main():
     date_str, data = get_futures_data()
     
     if not data:
-        send_tg_msg("❌ 系統錯誤：回溯 15 天仍查無 CSV 資料，請確認期交所官網是否維護中。")
+        print("❌ 依然找不到資料。")
+        send_tg_msg(f"❌ *系統錯誤*：回溯 6 天仍無法取得期交所 CSV。請確認官網連線狀況。")
         return
 
-    # 存檔 CSV (維持不變)
+    # 存檔至 CSV (資料夾: data/)
     file_path = 'data/futures_history.csv'
     os.makedirs('data', exist_ok=True)
     df_new = pd.DataFrame(data)
@@ -110,7 +121,7 @@ def main():
         df_final = df_new
     df_final.to_csv(file_path, index=False, encoding='utf-8-sig')
 
-    # TG 推送
+    # TG 訊息推送
     msg = f"📊 *每日小外資籌碼報告*\n📅 資料日期：{date_str}\n"
     msg += "---" + "\n"
     for item in data:
