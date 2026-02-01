@@ -1,36 +1,58 @@
-name: Daily Futures Report
+name: Daily Futures Data Scraper
 
 on:
   schedule:
-    # 台北時間 15:10 執行
-    - cron: '10 7 * * 1-5'
-  workflow_dispatch:
+    # 台北時間週一至週五 15:15 執行 (UTC 07:15)
+    - cron: '15 7 * * 1-5'
+  workflow_dispatch: # 允許你手動點擊執行，適合六日想看數據時使用
 
 jobs:
-  run-scraper:
+  build_and_run:
     runs-on: ubuntu-latest
+    
+    # 關鍵：賦予 GitHub Action 寫入權限，否則 push 會失敗
+    permissions:
+      contents: write
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v3
+      - name: 1. 檢查並下載儲存庫
+        uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - name: 2. 設定 Python 環境
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.10'
 
-      - name: Install
-        run: pip install pandas requests beautifulsoup4 lxml html5lib
+      - name: 3. 安裝必要套件
+        run: |
+          pip install pandas requests beautifulsoup4 lxml html5lib
 
-      - name: Execute
+      - name: 4. 執行抓取程式
         env:
+          # 從 Repository Secrets 讀取你的 TG 密鑰
           TG_TOKEN: ${{ secrets.TG_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: python main.py
 
-      - name: Git Push
+      - name: 5. 將更新後的 CSV 存回 GitHub
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git add data/futures_history.csv
-          git commit -m "Update Data: $(date +'%Y-%m-%d')" || exit 0
-          git push
+          
+          # 確保 data 資料夾存在，避免 git add 報錯
+          mkdir -p data
+          
+          # 檢查是否有檔案變動
+          if [ -f "data/futures_history.csv" ]; then
+            git add data/futures_history.csv
+            
+            # 只有在真的有資料變更時才 commit，防止沒變動時噴錯
+            if git diff --staged --quiet; then
+              echo "今日數據已存在且無變動，不執行 Commit。"
+            else
+              git commit -m "自動更新期貨籌碼數據: $(date +'%Y-%m-%d')"
+              git push
+            fi
+          else
+            echo "未發現 CSV 檔案，跳過 Git 更新。"
+          fi
