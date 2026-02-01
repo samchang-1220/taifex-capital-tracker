@@ -10,52 +10,38 @@ TG_CHAT_ID = os.getenv('TG_CHAT_ID')
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
 
 def send_tg_msg(message):
-    if not TG_TOKEN or not TG_CHAT_ID:
-        print("❌ 未設定 TG Token 或 Chat ID")
-        return
+    if not TG_TOKEN or not TG_CHAT_ID: return
     url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-    payload = {"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"}
-    try:
-        r = requests.post(url, json=payload)
-        print(f"TG 發送狀態: {r.status_code}, 回應: {r.text}")
-    except Exception as e:
-        print(f"TG 發送異常: {e}")
-
-def get_taifex_table(url, date_str, match_text):
-    """通用抓取期交所表格函數"""
-    try:
-        resp = requests.post(url, data={'queryDate': date_str}, headers=HEADERS, timeout=15)
-        if "查無資料" in resp.text or not resp.text.strip():
-            return None
-        
-        # 抓取所有表格
-        dfs = pd.read_html(io.StringIO(resp.text))
-        for df in dfs:
-            # 只要表格內容包含關鍵字，就是我們要的
-            if df.astype(str).apply(lambda x: x.str.contains(match_text)).any().any():
-                return df
-    except Exception as e:
-        print(f"抓取失敗 ({match_text}): {e}")
-    return None
+    requests.post(url, json={"chat_id": TG_CHAT_ID, "text": message, "parse_mode": "Markdown"})
 
 def get_futures_data():
     check_date = datetime.now()
     found_data = False
-    max_tries = 10 
+    max_tries = 15 # 增加回溯天數防止過年連假
     
     while not found_data and max_tries > 0:
         date_str = check_date.strftime("%Y/%m/%d")
         print(f"🔍 嘗試抓取日期: {date_str}...")
         
-        # 1. 抓取三大法人
-        df_inst = get_taifex_table("https://www.taifex.com.tw/cht/3/futContractsDate", date_str, "臺股期貨")
-        # 2. 抓取大額交易人
-        df_large = get_taifex_table("https://www.taifex.com.tw/cht/3/largeTradersFutQry", date_str, "臺股期貨")
+        try:
+            # 1. 下載三大法人 CSV
+            inst_url = "https://www.taifex.com.tw/cht/3/futContractsDateDown"
+            r1 = requests.post(inst_url, data={'queryDate': date_str, 'commodityId': ''}, headers=HEADERS)
+            
+            # 2. 下載大額交易人 CSV
+            large_url = "https://www.taifex.com.tw/cht/3/largeTradersFutDown"
+            r2 = requests.post(large_url, data={'queryDate': date_str}, headers=HEADERS)
 
-        if df_inst is not None and df_large is not None:
-            found_data = True
-            print(f"✅ 成功找到 {date_str} 的數據")
-            break
+            # 檢查檔案是否有效 (CSV 檔頭通常包含日期)
+            if "日期" in r1.text and "日期" in r2.text:
+                # 讀取 CSV
+                df_inst = pd.read_csv(io.StringIO(r1.text))
+                df_large = pd.read_csv(io.StringIO(r2.text))
+                found_data = True
+                print(f"✅ 成功找到 {date_str} 的 CSV 數據")
+                break
+        except Exception as e:
+            print(f"抓取發生異常: {e}")
         
         check_date -= timedelta(days=1)
         max_tries -= 1
@@ -64,7 +50,7 @@ def get_futures_data():
         return None, None
 
     results = []
-    # 標的對應 (台指期, 那指期)
+    # 標的設定
     targets = [
         {"name": "台指期", "inst_code": "臺股期貨", "large_code": "臺股期貨"},
         {"name": "那指期", "inst_code": "美國那斯達克100期貨", "large_code": "美國那斯達克100"}
@@ -72,27 +58,30 @@ def get_futures_data():
 
     for t in targets:
         try:
-            # --- 三大法人數據 ---
-            # 找到標的所在列
-            inst_rows = df_inst[df_inst.iloc[:, 1].str.contains(t['inst_code'], na=False)]
-            # 外資通常是該標的的第1列，投信第2列。未平倉淨額在第13欄
-            f_net = int(inst_rows.iloc[0, 13])
-            i_net = int(inst_rows.iloc[1, 13])
+            # --- 三大法人計算 ---
+            # 篩選標的
+            target_inst = df_inst[df_inst['商品名稱'].str.strip() == t['inst_code']]
+            # 外資 (身份別為外資及陸資)
+            foreign_net = int(target_inst[target_inst['身份別'].str.contains("外資")]['未平倉持有工口數-淨額'].values[0])
+            # 投信
+            trust_net = int(target_inst[target_inst['身份別'].str.contains("投信")]['未平倉持有工口數-淨額'].values[0])
 
-            # --- 大額交易人數據 ---
-            large_rows = df_large[df_large.iloc[:, 1].str.contains(t['large_code'], na=False)]
-            # 抓取「所有月份」且「前五大」之「特定法人」的多空頭部位 (欄位 5, 6)
-            top5_buy = int(large_rows.iloc[0, 5])
-            top5_sell = int(large_rows.iloc[0, 6])
+            # --- 大額交易人計算 ---
+            # 篩選標的，且合約月份為「所有月份」
+            target_large = df_large[(df_large['商品名稱'].str.strip() == t['large_code']) & (df_large['合約月份'] == '所有月份')]
+            # 抓取「前五大特定法人」的多空部位 (CSV 欄位名稱請見官網說明)
+            # 在 CSV 中，前五大特定法人多方/空方通常是第 10, 11 欄 (索引 9, 10)
+            top5_buy = int(target_large.iloc[0, 9])
+            top5_sell = int(target_large.iloc[0, 10])
             top5_net = top5_buy - top5_sell
 
-            # --- 公式計算 ---
-            big_f = top5_net - i_net
-            small_f = f_net - big_f
+            # --- 小外資公式 ---
+            big_f = top5_net - trust_net
+            small_f = foreign_net - big_f
             
             results.append({
                 "標的": t['name'],
-                "外資": f_net,
+                "外資": foreign_net,
                 "大外資": big_f,
                 "小外資": small_f,
                 "預測": "🟢 偏多" if small_f > 0 else "🔴 偏空"
@@ -106,15 +95,14 @@ def main():
     date_str, data = get_futures_data()
     
     if not data:
-        send_tg_msg("❌ 系統錯誤：回溯 10 天仍無法解析期交所數據，請檢查網頁格式。")
+        send_tg_msg("❌ 系統錯誤：回溯 15 天仍查無 CSV 資料，請確認期交所官網是否維護中。")
         return
 
-    # 存檔 CSV
+    # 存檔 CSV (維持不變)
     file_path = 'data/futures_history.csv'
     os.makedirs('data', exist_ok=True)
     df_new = pd.DataFrame(data)
     df_new['Date'] = date_str
-    
     if os.path.exists(file_path):
         df_old = pd.read_csv(file_path)
         df_final = pd.concat([df_old, df_new]).drop_duplicates(subset=['Date', '標的'], keep='last')
@@ -131,7 +119,6 @@ def main():
         msg += f"▫️ 大外資: {item['大外資']:,}\n"
         msg += f"▫️ *小外資: {item['小外資']:,}*\n"
         msg += f"💡 預測: {item['預測']}\n\n"
-    
     send_tg_msg(msg)
 
 if __name__ == "__main__":
