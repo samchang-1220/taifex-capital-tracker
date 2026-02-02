@@ -3,7 +3,7 @@ name: Daily Futures Data Scraper
 on:
   schedule:
     # 台北時間週一至週五 15:15 執行 (UTC 07:15)
-    - cron: '15 7 * * 1-5'
+    - cron: '15 7 * * 6'
   workflow_dispatch: # 允許你手動點擊執行，適合六日想看數據時使用
 
 jobs:
