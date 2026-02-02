@@ -1,11 +1,10 @@
-name: Daily TXF Small Foreign Analytics
+name: Daily TXF and UNF Analytics
 
 on:
   schedule:
     - cron: '40 7 * * 1-5'
   workflow_dispatch:
 
-# 必須賦予權限讓 Actions 可以寫入檔案回倉庫
 permissions:
   contents: write
 
@@ -23,8 +22,7 @@ jobs:
         python-version: '3.9'
 
     - name: Install dependencies
-      run: |
-        pip install requests pandas
+      run: pip install requests pandas
 
     - name: Run Analytics
       env:
@@ -36,6 +34,6 @@ jobs:
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
-        git add history_data.csv || echo "No history data to add"
-        git commit -m "Update history_data.csv [skip ci]" || echo "No changes to commit"
+        git add history_data_txf.csv history_data_unf.csv || echo "No files to add"
+        git commit -m "Update history data [skip ci]" || echo "No changes to commit"
         git push
