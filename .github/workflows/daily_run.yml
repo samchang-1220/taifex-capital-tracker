@@ -2,9 +2,12 @@ name: Daily TXF Small Foreign Analytics
 
 on:
   schedule:
-    # 台灣時間 15:40 = UTC 時間 07:40
     - cron: '40 7 * * 1-5'
-  workflow_dispatch: # 允許手動觸發測試
+  workflow_dispatch:
+
+# 必須賦予權限讓 Actions 可以寫入檔案回倉庫
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -28,3 +31,11 @@ jobs:
         TG_TOKEN: ${{ secrets.TG_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
       run: python main.py
+
+    - name: Commit and push changes
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add history_data.csv || echo "No history data to add"
+        git commit -m "Update history_data.csv [skip ci]" || echo "No changes to commit"
+        git push
