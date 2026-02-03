@@ -2,8 +2,9 @@ name: Daily TXF and UNF Analytics
 
 on:
   schedule:
-    - cron: '40 7 * * 1-5'
-  workflow_dispatch:
+    # 台灣時間 16:10 = UTC 時間 08:10 (1-5 代表週一至週五)
+    - cron: '10 8 * * 1-5'
+  workflow_dispatch: # 保留手動觸發按鈕
 
 permissions:
   contents: write
@@ -24,16 +25,19 @@ jobs:
     - name: Install dependencies
       run: pip install requests pandas
 
-    - name: Run Analytics
+    - name: Run Analytics with Retry
       env:
         TG_TOKEN: ${{ secrets.TG_TOKEN }}
         TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-      run: python main.py
+      # 增加自動重試邏輯：失敗則等待後再試，最多三次
+      run: |
+        python main.py || (sleep 30 && python main.py) || (sleep 60 && python main.py)
 
     - name: Commit and push changes
       run: |
         git config --local user.email "action@github.com"
         git config --local user.name "GitHub Action"
+        # 確保資料庫檔案變動會被存回 GitHub
         git add history_data_txf.csv history_data_unf.csv || echo "No files to add"
         git commit -m "Update history data [skip ci]" || echo "No changes to commit"
         git push
